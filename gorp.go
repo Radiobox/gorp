@@ -16,7 +16,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"reflect"
 	"regexp"
 	"strings"
@@ -113,7 +112,7 @@ type DbMap struct {
 	TypeConverter TypeConverter
 
 	tables    []*TableMap
-	logger    *log.Logger
+	logger    GorpLogger
 	logPrefix string
 }
 
@@ -121,16 +120,18 @@ type DbMap struct {
 // Use dbmap.AddTable() or dbmap.AddTableWithName() to create these
 type TableMap struct {
 	// Name of database table.
-	TableName  string
-	gotype     reflect.Type
-	columns    []*ColumnMap
-	keys       []*ColumnMap
-	version    *ColumnMap
-	insertPlan bindPlan
-	updatePlan bindPlan
-	deletePlan bindPlan
-	getPlan    bindPlan
-	dbmap      *DbMap
+	TableName      string
+	SchemaName     string
+	gotype         reflect.Type
+	columns        []*ColumnMap
+	keys           []*ColumnMap
+	uniqueTogether [][]string
+	version        *ColumnMap
+	insertPlan     bindPlan
+	updatePlan     bindPlan
+	deletePlan     bindPlan
+	getPlan        bindPlan
+	dbmap          *DbMap
 }
 
 // ResetSql removes cached insert/update/select/delete SQL strings
@@ -164,6 +165,30 @@ func (t *TableMap) SetKeys(isAutoIncr bool, fieldNames ...string) *TableMap {
 		colmap.isAutoIncr = isAutoIncr
 		t.keys = append(t.keys, colmap)
 	}
+	t.ResetSql()
+
+	return t
+}
+
+// SetUniqueTogether lets you specify uniqueness constraints across multiple
+// columns on the table. Each call adds an additional constraint for the
+// specified columns.
+//
+// Automatically calls ResetSql() to ensure SQL statements are regenerated.
+//
+// Panics if fieldNames length < 2.
+//
+func (t *TableMap) SetUniqueTogether(fieldNames ...string) *TableMap {
+	if len(fieldNames) < 2 {
+		panic(fmt.Sprintf(
+			"gorp: SetUniqueTogether: must provide at least two fieldNames to set uniqueness constraint."))
+	}
+
+	columns := make([]string, 0)
+	for _, name := range fieldNames {
+		columns = append(columns, name)
+	}
+	t.uniqueTogether = append(t.uniqueTogether, columns)
 	t.ResetSql()
 
 	return t
@@ -273,7 +298,7 @@ func (t *TableMap) bindInsert(elem reflect.Value) (bindInstance, error) {
 
 		s := bytes.Buffer{}
 		s2 := bytes.Buffer{}
-		s.WriteString(fmt.Sprintf("insert into %s (", t.dbmap.Dialect.QuoteField(t.TableName)))
+		s.WriteString(fmt.Sprintf("insert into %s (", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName)))
 
 		x := 0
 		first := true
@@ -326,7 +351,7 @@ func (t *TableMap) bindUpdate(elem reflect.Value) (bindInstance, error) {
 	if plan.query == "" {
 
 		s := bytes.Buffer{}
-		s.WriteString(fmt.Sprintf("update %s set ", t.dbmap.Dialect.QuoteField(t.TableName)))
+		s.WriteString(fmt.Sprintf("update %s set ", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName)))
 		x := 0
 
 		for y := range t.columns {
@@ -384,7 +409,7 @@ func (t *TableMap) bindDelete(elem reflect.Value) (bindInstance, error) {
 	if plan.query == "" {
 
 		s := bytes.Buffer{}
-		s.WriteString(fmt.Sprintf("delete from %s", t.dbmap.Dialect.QuoteField(t.TableName)))
+		s.WriteString(fmt.Sprintf("delete from %s", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName)))
 
 		for y := range t.columns {
 			col := t.columns[y]
@@ -444,7 +469,7 @@ func (t *TableMap) bindGet() bindPlan {
 			}
 		}
 		s.WriteString(" from ")
-		s.WriteString(t.dbmap.Dialect.QuoteField(t.TableName))
+		s.WriteString(t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName))
 		s.WriteString(" where ")
 		for x := range t.keys {
 			col := t.keys[x]
@@ -561,6 +586,7 @@ type SqlExecutor interface {
 	SelectNullFloat(query string, args ...interface{}) (sql.NullFloat64, error)
 	SelectStr(query string, args ...interface{}) (string, error)
 	SelectNullStr(query string, args ...interface{}) (sql.NullString, error)
+	SelectOne(holder interface{}, query string, args ...interface{}) error
 	query(query string, args ...interface{}) (*sql.Rows, error)
 	queryRow(query string, args ...interface{}) *sql.Row
 }
@@ -569,6 +595,10 @@ type SqlExecutor interface {
 // interface.
 var _, _ SqlExecutor = &DbMap{}, &Transaction{}
 
+type GorpLogger interface {
+	Printf(format string, v ...interface{})
+}
+
 // TraceOn turns on SQL statement logging for this DbMap.  After this is
 // called, all SQL statements will be sent to the logger.  If prefix is
 // a non-empty string, it will be written to the front of all logged
@@ -576,7 +606,11 @@ var _, _ SqlExecutor = &DbMap{}, &Transaction{}
 //
 // Use TraceOn if you want to spy on the SQL statements that gorp
 // generates.
-func (m *DbMap) TraceOn(prefix string, logger *log.Logger) {
+//
+// Note that the base log.Logger type satisfies GorpLogger, but adapters can
+// easily be written for other logging packages (e.g., the golang-sanctioned
+// glog framework).
+func (m *DbMap) TraceOn(prefix string, logger GorpLogger) {
 	m.logger = logger
 	if prefix == "" {
 		m.logPrefix = prefix
@@ -605,6 +639,12 @@ func (m *DbMap) AddTable(i interface{}) *TableMap {
 // AddTableWithName has the same behavior as AddTable, but sets
 // table.TableName to name.
 func (m *DbMap) AddTableWithName(i interface{}, name string) *TableMap {
+	return m.AddTableWithNameAndSchema(i, "", name)
+}
+
+// AddTableWithNameAndSchema has the same behavior as AddTable, but sets
+// table.TableName to name.
+func (m *DbMap) AddTableWithNameAndSchema(i interface{}, schema string, name string) *TableMap {
 	t := reflect.TypeOf(i)
 	if name == "" {
 		name = t.Name()
@@ -620,7 +660,7 @@ func (m *DbMap) AddTableWithName(i interface{}, name string) *TableMap {
 		}
 	}
 
-	tmap := &TableMap{gotype: t, TableName: name, dbmap: m}
+	tmap := &TableMap{gotype: t, TableName: name, SchemaName: schema, dbmap: m}
 	tmap.columns, tmap.version = readStructColumns(t)
 	m.tables = append(m.tables, tmap)
 
@@ -704,12 +744,23 @@ func (m *DbMap) createTables(ifNotExists bool) error {
 	for i := range m.tables {
 		table := m.tables[i]
 
+		s := bytes.Buffer{}
+
+		if strings.TrimSpace(table.SchemaName) != "" {
+			schemaCreate := "create schema"
+			if ifNotExists {
+				schemaCreate += " if not exists"
+			}
+
+			s.WriteString(fmt.Sprintf("%s %s;", schemaCreate, table.SchemaName))
+		}
+
 		create := "create table"
 		if ifNotExists {
 			create += " if not exists"
 		}
-		s := bytes.Buffer{}
-		s.WriteString(fmt.Sprintf("%s %s (", create, m.Dialect.QuoteField(table.TableName)))
+
+		s.WriteString(fmt.Sprintf("%s %s (", create, m.Dialect.QuotedTableForQuery(table.SchemaName, table.TableName)))
 		x := 0
 		for _, col := range table.columns {
 			if !col.Transient {
@@ -745,6 +796,18 @@ func (m *DbMap) createTables(ifNotExists bool) error {
 			}
 			s.WriteString(")")
 		}
+		if len(table.uniqueTogether) > 0 {
+			for _, columns := range table.uniqueTogether {
+				s.WriteString(", unique (")
+				for i, column := range columns {
+					if i > 0 {
+						s.WriteString(", ")
+					}
+					s.WriteString(m.Dialect.QuoteField(column))
+				}
+				s.WriteString(")")
+			}
+		}
 		s.WriteString(") ")
 		s.WriteString(m.Dialect.CreateTableSuffix())
 		s.WriteString(";")
@@ -754,6 +817,20 @@ func (m *DbMap) createTables(ifNotExists bool) error {
 		}
 	}
 	return err
+}
+
+// DropTable drops an individual table.  Will throw an error
+// if the table does not exist.
+func (m *DbMap) DropTable(table interface{}) error {
+	t := reflect.TypeOf(table)
+	return m.dropTable(t, false)
+}
+
+// DropTable drops an individual table.  Will NOT throw an error
+// if the table does not exist.
+func (m *DbMap) DropTableIfExists(table interface{}) error {
+	t := reflect.TypeOf(table)
+	return m.dropTable(t, true)
 }
 
 // DropTables iterates through TableMaps registered to this DbMap and
@@ -768,20 +845,35 @@ func (m *DbMap) DropTablesIfExists() error {
 	return m.dropTables(true)
 }
 
-func (m *DbMap) dropTables(addIfExists bool) error {
+// Goes through all the registered tables, dropping them one by one.
+// If an error is encountered, then it is returned and the rest of
+// the tables are not dropped.
+func (m *DbMap) dropTables(addIfExists bool) (err error) {
+	for _, table := range m.tables {
+		err = m.dropTableImpl(table, addIfExists)
+		if err != nil {
+			return
+		}
+	}
+	return err
+}
+
+// Implementation of dropping a single table.
+func (m *DbMap) dropTable(t reflect.Type, addIfExists bool) error {
+	table := tableOrNil(m, t)
+	if table == nil {
+		return errors.New(fmt.Sprintf("table %s was not registered!", table.TableName))
+	}
+
+	return m.dropTableImpl(table, addIfExists)
+}
+
+func (m *DbMap) dropTableImpl(table *TableMap, addIfExists bool) (err error) {
 	ifExists := ""
 	if addIfExists {
 		ifExists = " if exists"
 	}
-
-	var err error
-	for i := range m.tables {
-		table := m.tables[i]
-		_, e := m.Exec(fmt.Sprintf("drop table%s %s;", ifExists, m.Dialect.QuoteField(table.TableName)))
-		if e != nil {
-			err = e
-		}
-	}
+	_, err = m.Exec(fmt.Sprintf("drop table%s %s;", ifExists, m.Dialect.QuotedTableForQuery(table.SchemaName, table.TableName)))
 	return err
 }
 
@@ -793,7 +885,7 @@ func (m *DbMap) TruncateTables() error {
 	var err error
 	for i := range m.tables {
 		table := m.tables[i]
-		_, e := m.Exec(fmt.Sprintf("%s %s;", m.Dialect.TruncateClause(), m.Dialect.QuoteField(table.TableName)))
+		_, e := m.Exec(fmt.Sprintf("%s %s;", m.Dialect.TruncateClause(), m.Dialect.QuotedTableForQuery(table.SchemaName, table.TableName)))
 		if e != nil {
 			err = e
 		}
@@ -1213,7 +1305,7 @@ func SelectNullStr(e SqlExecutor, query string, args ...interface{}) (sql.NullSt
 // SelectOne executes the given query (which should be a SELECT statement)
 // and binds the result to holder, which must be a pointer.
 //
-// If no row is found, holder will point at the zero value
+// If no row is found, an an error (sql.ErrNoRows specifically) will be returned
 //
 // If more than one row is found, an error will be returned.
 //
@@ -1243,8 +1335,8 @@ func SelectOne(m *DbMap, e SqlExecutor, holder interface{}, query string, args .
 			src := reflect.ValueOf(list[0])
 			dest.Elem().Set(src.Elem())
 		} else {
-			// not found - set pointer to zero val
-			dest.Elem().Set(reflect.Zero(t))
+			// No rows found, return a proper error.
+			return sql.ErrNoRows
 		}
 
 		return nil
