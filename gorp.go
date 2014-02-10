@@ -646,6 +646,9 @@ func (m *DbMap) AddTableWithName(i interface{}, name string) *TableMap {
 // table.TableName to name.
 func (m *DbMap) AddTableWithNameAndSchema(i interface{}, schema string, name string) *TableMap {
 	t := reflect.TypeOf(i)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
 	if name == "" {
 		name = t.Name()
 	}
