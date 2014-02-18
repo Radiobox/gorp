@@ -1845,19 +1845,25 @@ func insert(m *DbMap, exec SqlExecutor, list ...interface{}) error {
 		}
 
 		if bi.autoIncrIdx > -1 {
-			id, err := m.Dialect.InsertAutoIncr(exec, bi.query, bi.args...)
+			f := elem.FieldByName(bi.autoIncrFieldName)
+			target := f
+			if target.Kind() != reflect.Ptr {
+				target = f.Addr()
+			}
+			err := m.Dialect.InsertAutoIncr(exec, bi.query, target.Interface(), bi.args...)
 			if err != nil {
 				return err
 			}
-			f := elem.FieldByName(bi.autoIncrFieldName)
-			k := f.Kind()
-			if (k == reflect.Int) || (k == reflect.Int16) || (k == reflect.Int32) || (k == reflect.Int64) {
-				f.SetInt(id)
-			} else if (k == reflect.Uint16) || (k == reflect.Uint32) || (k == reflect.Uint64) {
-				f.SetUint(uint64(id))
-			} else {
-				return fmt.Errorf("gorp: Cannot set autoincrement value on non-Int field. SQL=%s  autoIncrIdx=%d autoIncrFieldName=%s", bi.query, bi.autoIncrIdx, bi.autoIncrFieldName)
-			}
+			// k := f.Kind()
+			// if (k == reflect.Int) || (k == reflect.Int16) || (k == reflect.Int32) || (k == reflect.Int64) {
+			// 	f.SetInt(id.(int64))
+			// } else if (k == reflect.Uint16) || (k == reflect.Uint32) || (k == reflect.Uint64) {
+			// 	f.SetUint(uint64(id.(int64)))
+			// } else if k == reflect.String {
+			// 	f.SetString(id.(string))
+			// } else {
+			// 	return fmt.Errorf("gorp: Cannot set autoincrement value on non-Int field. SQL=%s  autoIncrIdx=%d autoIncrFieldName=%s", bi.query, bi.autoIncrIdx, bi.autoIncrFieldName)
+			// }
 		} else {
 			_, err := exec.Exec(bi.query, bi.args...)
 			if err != nil {

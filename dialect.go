@@ -32,7 +32,7 @@ type Dialect interface {
 	// string to truncate tables
 	TruncateClause() string
 
-	InsertAutoIncr(exec SqlExecutor, insertSql string, params ...interface{}) (int64, error)
+	InsertAutoIncr(exec SqlExecutor, insertSql string, idTarget interface{}, params ...interface{}) error
 
 	// bind variable string to use when forming SQL statements
 	// in many dbs it is "?", but Postgres appears to use $1
@@ -53,12 +53,14 @@ type Dialect interface {
 	QuotedTableForQuery(schema string, table string) string
 }
 
-func standardInsertAutoIncr(exec SqlExecutor, insertSql string, params ...interface{}) (int64, error) {
+func standardInsertAutoIncr(exec SqlExecutor, insertSql string, idTarget interface{}, params ...interface{}) error {
 	res, err := exec.Exec(insertSql, params...)
 	if err != nil {
-		return 0, err
+		return err
 	}
-	return res.LastInsertId()
+	id, err := res.LastInsertId()
+	reflect.ValueOf(idTarget).Elem().Set(reflect.ValueOf(id))
+	return err
 }
 
 ///////////////////////////////////////////////////////
@@ -134,8 +136,8 @@ func (d SqliteDialect) BindVar(i int) string {
 	return "?"
 }
 
-func (d SqliteDialect) InsertAutoIncr(exec SqlExecutor, insertSql string, params ...interface{}) (int64, error) {
-	return standardInsertAutoIncr(exec, insertSql, params...)
+func (d SqliteDialect) InsertAutoIncr(exec SqlExecutor, insertSql string, idTarget interface{}, params ...interface{}) error {
+	return standardInsertAutoIncr(exec, insertSql, idTarget, params...)
 }
 
 func (d SqliteDialect) QuoteField(f string) string {
@@ -227,20 +229,19 @@ func (d PostgresDialect) BindVar(i int) string {
 	return fmt.Sprintf("$%d", i+1)
 }
 
-func (d PostgresDialect) InsertAutoIncr(exec SqlExecutor, insertSql string, params ...interface{}) (int64, error) {
+func (d PostgresDialect) InsertAutoIncr(exec SqlExecutor, insertSql string, idTarget interface{}, params ...interface{}) error {
 	rows, err := exec.query(insertSql, params...)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer rows.Close()
 
 	if rows.Next() {
-		var id int64
-		err := rows.Scan(&id)
-		return id, err
+		err := rows.Scan(idTarget)
+		return err
 	}
 
-	return 0, errors.New("No serial value returned for insert: " + insertSql + " Encountered error: " + rows.Err().Error())
+	return errors.New("No serial value returned for insert: " + insertSql + " Encountered error: " + rows.Err().Error())
 }
 
 func (d PostgresDialect) QuoteField(f string) string {
@@ -248,7 +249,7 @@ func (d PostgresDialect) QuoteField(f string) string {
 }
 
 func (d PostgresDialect) QuotedTableForQuery(schema string, table string) string {
-	if (strings.TrimSpace(schema) == "") {
+	if strings.TrimSpace(schema) == "" {
 		return d.QuoteField(table)
 	}
 
@@ -349,8 +350,8 @@ func (m MySQLDialect) BindVar(i int) string {
 	return "?"
 }
 
-func (m MySQLDialect) InsertAutoIncr(exec SqlExecutor, insertSql string, params ...interface{}) (int64, error) {
-	return standardInsertAutoIncr(exec, insertSql, params...)
+func (m MySQLDialect) InsertAutoIncr(exec SqlExecutor, insertSql string, idTarget interface{}, params ...interface{}) error {
+	return standardInsertAutoIncr(exec, insertSql, idTarget, params...)
 }
 
 func (d MySQLDialect) QuoteField(f string) string {
