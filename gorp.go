@@ -981,14 +981,9 @@ func (m *DbMap) Select(i interface{}, query string, args ...interface{}) ([]inte
 }
 
 // Exec runs an arbitrary SQL statement.  args represent the bind parameters.
-// This is equivalent to running:  Prepare(), Exec() using database/sql
+// This is equivalent to running:  Exec() using database/sql
 func (m *DbMap) Exec(query string, args ...interface{}) (sql.Result, error) {
-	m.trace(query, args)
-	//stmt, err := m.Db.Prepare(query)
-	//if err != nil {
-	//	return nil, err
-	//}
-	//fmt.Println("Exec", query, args)
+	m.trace(query, args...)
 	return m.Db.Exec(query, args...)
 }
 
@@ -1040,7 +1035,7 @@ func (m *DbMap) Begin() (*Transaction, error) {
 func (m *DbMap) tableFor(t reflect.Type, checkPK bool) (*TableMap, error) {
 	table := tableOrNil(m, t)
 	if table == nil {
-		panic(fmt.Sprintf("No table found for type: %v", t.Name()))
+		return nil, errors.New(fmt.Sprintf("No table found for type: %v", t.Name()))
 	}
 
 	if checkPK && len(table.keys) < 1 {
@@ -1080,12 +1075,12 @@ func (m *DbMap) tableForPointer(ptr interface{}, checkPK bool) (*TableMap, refle
 }
 
 func (m *DbMap) queryRow(query string, args ...interface{}) *sql.Row {
-	m.trace(query, args)
+	m.trace(query, args...)
 	return m.Db.QueryRow(query, args...)
 }
 
 func (m *DbMap) query(query string, args ...interface{}) (*sql.Rows, error) {
-	m.trace(query, args)
+	m.trace(query, args...)
 	return m.Db.Query(query, args...)
 }
 
@@ -1124,13 +1119,8 @@ func (t *Transaction) Select(i interface{}, query string, args ...interface{}) (
 
 // Exec has the same behavior as DbMap.Exec(), but runs in a transaction.
 func (t *Transaction) Exec(query string, args ...interface{}) (sql.Result, error) {
-	t.dbmap.trace(query, args)
-	stmt, err := t.tx.Prepare(query)
-	if err != nil {
-		return nil, err
-	}
-	defer stmt.Close()
-	return stmt.Exec(args...)
+	t.dbmap.trace(query, args...)
+	return t.tx.Exec(query, args...)
 }
 
 // SelectInt is a convenience wrapper around the gorp.SelectInt function.
@@ -1221,12 +1211,12 @@ func (t *Transaction) ReleaseSavepoint(savepoint string) error {
 }
 
 func (t *Transaction) queryRow(query string, args ...interface{}) *sql.Row {
-	t.dbmap.trace(query, args)
+	t.dbmap.trace(query, args...)
 	return t.tx.QueryRow(query, args...)
 }
 
 func (t *Transaction) query(query string, args ...interface{}) (*sql.Rows, error) {
-	t.dbmap.trace(query, args)
+	t.dbmap.trace(query, args...)
 	return t.tx.Query(query, args...)
 }
 
@@ -1238,7 +1228,7 @@ func (t *Transaction) query(query string, args ...interface{}) (*sql.Rows, error
 func SelectInt(e SqlExecutor, query string, args ...interface{}) (int64, error) {
 	var h int64
 	err := selectVal(e, &h, query, args...)
-	if err != nil {
+	if err != nil && err != sql.ErrNoRows {
 		return 0, err
 	}
 	return h, nil
@@ -1250,7 +1240,7 @@ func SelectInt(e SqlExecutor, query string, args ...interface{}) (int64, error) 
 func SelectNullInt(e SqlExecutor, query string, args ...interface{}) (sql.NullInt64, error) {
 	var h sql.NullInt64
 	err := selectVal(e, &h, query, args...)
-	if err != nil {
+	if err != nil && err != sql.ErrNoRows {
 		return h, err
 	}
 	return h, nil
@@ -1262,7 +1252,7 @@ func SelectNullInt(e SqlExecutor, query string, args ...interface{}) (sql.NullIn
 func SelectFloat(e SqlExecutor, query string, args ...interface{}) (float64, error) {
 	var h float64
 	err := selectVal(e, &h, query, args...)
-	if err != nil {
+	if err != nil && err != sql.ErrNoRows {
 		return 0, err
 	}
 	return h, nil
@@ -1274,7 +1264,7 @@ func SelectFloat(e SqlExecutor, query string, args ...interface{}) (float64, err
 func SelectNullFloat(e SqlExecutor, query string, args ...interface{}) (sql.NullFloat64, error) {
 	var h sql.NullFloat64
 	err := selectVal(e, &h, query, args...)
-	if err != nil {
+	if err != nil && err != sql.ErrNoRows {
 		return h, err
 	}
 	return h, nil
@@ -1286,7 +1276,7 @@ func SelectNullFloat(e SqlExecutor, query string, args ...interface{}) (sql.Null
 func SelectStr(e SqlExecutor, query string, args ...interface{}) (string, error) {
 	var h string
 	err := selectVal(e, &h, query, args...)
-	if err != nil {
+	if err != nil && err != sql.ErrNoRows {
 		return "", err
 	}
 	return h, nil
@@ -1299,7 +1289,7 @@ func SelectStr(e SqlExecutor, query string, args ...interface{}) (string, error)
 func SelectNullStr(e SqlExecutor, query string, args ...interface{}) (sql.NullString, error) {
 	var h sql.NullString
 	err := selectVal(e, &h, query, args...)
-	if err != nil {
+	if err != nil && err != sql.ErrNoRows {
 		return h, err
 	}
 	return h, nil
@@ -1363,14 +1353,11 @@ func selectVal(e SqlExecutor, holder interface{}, query string, args ...interfac
 	}
 	defer rows.Close()
 
-	if rows.Next() {
-		err = rows.Scan(holder)
-		if err != nil {
-			return err
-		}
+	if !rows.Next() {
+		return sql.ErrNoRows
 	}
 
-	return nil
+	return rows.Scan(holder)
 }
 
 ///////////////
