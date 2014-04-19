@@ -893,6 +893,10 @@ func (m *DbMap) TruncateTables() error {
 	return err
 }
 
+func (m *DbMap) Query(target interface{}) Query {
+	return query(m, m, target)
+}
+
 // Insert runs a SQL INSERT statement for each element in list.  List
 // items must be pointers.
 //
@@ -1088,6 +1092,10 @@ func (m *DbMap) trace(query string, args ...interface{}) {
 }
 
 ///////////////
+
+func (t *Transaction) Query(target interface{}) Query {
+	return query(t.dbmap, t, target)
+}
 
 // Insert has the same behavior as DbMap.Insert(), but runs in a transaction.
 func (t *Transaction) Insert(list ...interface{}) error {
