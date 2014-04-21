@@ -20,12 +20,12 @@ func TestQueryLanguage(t *testing.T) {
 	emptyInv := new(OverriddenInvoice)
 
 	err = dbmap.Query(emptyInv).
-		Set(&emptyInv.Id, "1").
-		Set(&emptyInv.Created, 1).
-		Set(&emptyInv.Updated, 1).
-		Set(&emptyInv.Memo, "test_memo").
-		Set(&emptyInv.PersonId, 1).
-		Set(&emptyInv.IsPaid, false).
+		Assign(&emptyInv.Id, "1").
+		Assign(&emptyInv.Created, 1).
+		Assign(&emptyInv.Updated, 1).
+		Assign(&emptyInv.Memo, "test_memo").
+		Assign(&emptyInv.PersonId, 1).
+		Assign(&emptyInv.IsPaid, false).
 		Insert()
 	if err != nil {
 		t.Errorf("Failed to insert: %s", err)
@@ -33,12 +33,12 @@ func TestQueryLanguage(t *testing.T) {
 	}
 
 	err = dbmap.Query(emptyInv).
-		Set(&emptyInv.Id, "2").
-		Set(&emptyInv.Created, 2).
-		Set(&emptyInv.Updated, 2).
-		Set(&emptyInv.Memo, "anoter_test_memo").
-		Set(&emptyInv.PersonId, 2).
-		Set(&emptyInv.IsPaid, false).
+		Assign(&emptyInv.Id, "2").
+		Assign(&emptyInv.Created, 2).
+		Assign(&emptyInv.Updated, 2).
+		Assign(&emptyInv.Memo, "another_test_memo").
+		Assign(&emptyInv.PersonId, 2).
+		Assign(&emptyInv.IsPaid, false).
 		Insert()
 	if err != nil {
 		t.Errorf("Failed to insert: %s", err)
@@ -46,12 +46,12 @@ func TestQueryLanguage(t *testing.T) {
 	}
 
 	err = dbmap.Query(emptyInv).
-		Set(&emptyInv.Id, "3").
-		Set(&emptyInv.Created, 1).
-		Set(&emptyInv.Updated, 3).
-		Set(&emptyInv.Memo, "test_memo").
-		Set(&emptyInv.PersonId, 1).
-		Set(&emptyInv.IsPaid, false).
+		Assign(&emptyInv.Id, "3").
+		Assign(&emptyInv.Created, 1).
+		Assign(&emptyInv.Updated, 3).
+		Assign(&emptyInv.Memo, "test_memo").
+		Assign(&emptyInv.PersonId, 1).
+		Assign(&emptyInv.IsPaid, false).
 		Insert()
 	if err != nil {
 		t.Errorf("Failed to insert: %s", err)
@@ -59,12 +59,12 @@ func TestQueryLanguage(t *testing.T) {
 	}
 
 	err = dbmap.Query(emptyInv).
-		Set(&emptyInv.Id, "4").
-		Set(&emptyInv.Created, 2).
-		Set(&emptyInv.Updated, 1).
-		Set(&emptyInv.Memo, "another_test_memo").
-		Set(&emptyInv.PersonId, 1).
-		Set(&emptyInv.IsPaid, false).
+		Assign(&emptyInv.Id, "4").
+		Assign(&emptyInv.Created, 2).
+		Assign(&emptyInv.Updated, 1).
+		Assign(&emptyInv.Memo, "another_test_memo").
+		Assign(&emptyInv.PersonId, 1).
+		Assign(&emptyInv.IsPaid, false).
 		Insert()
 	if err != nil {
 		t.Errorf("Failed to insert: %s", err)
@@ -85,7 +85,7 @@ func TestQueryLanguage(t *testing.T) {
 	}
 
 	count, err := dbmap.Query(emptyInv).
-		Set(&emptyInv.IsPaid, true).
+		Assign(&emptyInv.IsPaid, true).
 		Where().
 		Equal(&emptyInv.Id, "4").
 		Update()
@@ -164,6 +164,19 @@ func TestQueryLanguage(t *testing.T) {
 		t.FailNow()
 	}
 
+	invTest, err = dbmap.Query(emptyInv).
+		Where().
+		Filter(Or(Equal(&emptyInv.Memo, "another_test_memo"), Equal(&emptyInv.Updated, 3))).
+		Select()
+	if err != nil {
+		t.Errorf("Failed to select: %s", err)
+		t.FailNow()
+	}
+	if len(invTest) != 3 {
+		t.Errorf("Expected three invoices for ORed query")
+		t.FailNow()
+	}
+
 	count, err = dbmap.Query(emptyInv).
 		Where().
 		Equal(&emptyInv.IsPaid, true).
@@ -206,11 +219,11 @@ func BenchmarkSqlQuerySelect(b *testing.B) {
 	inv := &OverriddenInvoice{
 		Id: "1",
 		Invoice: Invoice{
-			Created: 1,
-			Updated: 1,
-			Memo: "test_memo",
+			Created:  1,
+			Updated:  1,
+			Memo:     "test_memo",
 			PersonId: 1,
-			IsPaid: false,
+			IsPaid:   false,
 		},
 	}
 	err = dbmap.Insert(inv)
@@ -242,11 +255,11 @@ func BenchmarkGorpQuerySelect(b *testing.B) {
 	inv := &OverriddenInvoice{
 		Id: "1",
 		Invoice: Invoice{
-			Created: 1,
-			Updated: 1,
-			Memo: "test_memo",
+			Created:  1,
+			Updated:  1,
+			Memo:     "test_memo",
 			PersonId: 1,
-			IsPaid: false,
+			IsPaid:   false,
 		},
 	}
 	err = dbmap.Insert(inv)
