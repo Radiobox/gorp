@@ -117,6 +117,20 @@ type Query interface {
 	Selector
 }
 
+type fieldColMap struct {
+	// addr should be the address (pointer value) of the field within
+	// the struct being used to construct this query.
+	addr interface{}
+
+	// column should be the column that matches the field that addr
+	// points to.
+	column *ColumnMap
+
+	// quotedColumn should be the pre-quoted column string for this
+	// column.
+	quotedColumn string
+}
+
 // A QueryPlan is a Query.  It returns itself on most method calls;
 // the one exception is Set(), which returns a SetQueryPlan (a type of
 // QueryPlan that implements SetQuery instead of Query).  The returned
@@ -128,33 +142,29 @@ type QueryPlan struct {
 	// stored on this field.  This is to allow cascading method calls,
 	// e.g.
 	//
-	//     query := dbMap.Query(someModel).
-	//         Select().
+	//     someModel := new(OurModel)
+	//     results, err := dbMap.Query(someModel).
+	//         Where().
 	//         Greater(&someModel.CreatedAt, yesterday).
 	//         Less(&someModel.CreatedAt, time.Now()).
-	//         Order(&someModel.CreatedAt, gorp.Descending)
-	//     results, err := plan.Execute()
+	//         Order(&someModel.CreatedAt, gorp.Descending).
+	//         Select()
 	//
-	// The error returned by Execute() will be the first value in the
-	// Errors slice if it is non-empty; any errors returned by the
-	// database upon executing the query; or nil if everything went
-	// correctly.
-	//
-	// Note that Execute() is called on the sub-type returned by your
-	// initial Select(), Update(), etc method call, and thus will have
-	// different return types depending on the type of query
-	// requested.
+	// The first time that a method call returns an error (e.g.
+	// Select(), Insert(), and so on), this field will be checked for
+	// errors that occurred during query construction, and if it is
+	// non-empty, the first error in the list will be returned.
 	Errors []error
 
 	table *TableMap
 	executor SqlExecutor
 	target reflect.Value
+	targetColMap []fieldColMap
 	assignCols []string
 	assignBindVars []string
 	where []string
-	orderBy string
-	orderByDirection string
-	groupBy string
+	orderBy []string
+	groupBy []string
 	limit int64
 	offset int64
 	args []interface{}
@@ -178,12 +188,19 @@ func query(m *DbMap, exec SqlExecutor, target interface{}) Query {
 		return plan
 	}
 	plan.table = targetTable
+
+	if err = plan.mapColumns(plan.target); err != nil {
+		plan.Errors = append(plan.Errors, err)
+	}
 	return plan
 }
 
-func findFieldType(value reflect.Value, fieldPtr interface{}) *reflect.StructField {
+func (plan *QueryPlan) mapColumns(value reflect.Value) (err error) {
 	value = value.Elem()
 	valueType := value.Type()
+	if plan.targetColMap == nil {
+		plan.targetColMap = make([]fieldColMap, 0, value.NumField())
+	}
 	for i := 0; i < value.NumField(); i++ {
 		fieldType := valueType.Field(i)
 		fieldVal := value.Field(i)
@@ -191,58 +208,41 @@ func findFieldType(value reflect.Value, fieldPtr interface{}) *reflect.StructFie
 			if fieldVal.Kind() != reflect.Ptr {
 				fieldVal = fieldVal.Addr()
 			}
-			if foundField := findFieldType(fieldVal, fieldPtr); foundField != nil {
-				return foundField
+			plan.mapColumns(fieldVal)
+		} else {
+			col := plan.table.ColMap(fieldType.Name)
+			quotedCol := plan.table.dbmap.Dialect.QuoteField(col.ColumnName)
+			fieldMap := fieldColMap{
+				addr: fieldVal.Addr().Interface(),
+				column: col,
+				quotedColumn: quotedCol,
 			}
-		} else if fieldVal.Addr().Interface() == fieldPtr {
-			return &fieldType
+			plan.targetColMap = append(plan.targetColMap, fieldMap)
 		}
 	}
-	return nil
-}
-
-func (plan *QueryPlan) ColumnForPointer(fieldPtr interface{}) (col *ColumnMap, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			// plan.table.ColMap() will panic if it can't find a
-			// column matching the passed in name.  We would rather
-			// return an error here, since we're dealing with user
-			// input.
-			err = errors.New("gorp: The passed in field does not seem to match a column in the applicable table")
-		}
-	}()
-	targetFieldPtr := findFieldType(plan.target, fieldPtr)
-	if targetFieldPtr == nil {
-		err = errors.New("gorp: Could not find a field matching the passed in field pointer")
-		return
-	}
-	targetField := *targetFieldPtr
-	col = plan.table.ColMap(targetField.Name)
 	return
 }
 
-func (plan *QueryPlan) columnOperatorString(fieldPtr interface{}, operator string) (string, error) {
-	column, err := plan.ColumnForPointer(fieldPtr)
-	if err != nil {
-		return "", err
+func (plan *QueryPlan) ColumnForPointer(fieldPtr interface{}) (string, error) {
+	for _, fieldMap := range plan.targetColMap {
+		if fieldMap.addr == fieldPtr {
+			if fieldMap.column.Transient {
+				return "", errors.New("gorp: Cannot run queries against transient columns")
+			}
+			return fieldMap.quotedColumn, nil
+		}
 	}
-	if column == nil {
-		return "", errors.New("gorp: Could not find matching column")
-	}
-	if column.Transient {
-		return "", errors.New("gorp: Cannot query transient column")
-	}
-	colStr := plan.table.dbmap.Dialect.QuoteField(column.ColumnName)
-	valStr := plan.table.dbmap.Dialect.BindVar(len(plan.args))
-	return colStr + operator + valStr, nil
+	return "", errors.New("gorp: Cannot find a field matching the passed in pointer")
 }
 
 func (plan *QueryPlan) addWhere(fieldPtr interface{}, operator string, value interface{}) {
-	whereStr, err := plan.columnOperatorString(fieldPtr, operator)
+	column, err := plan.ColumnForPointer(fieldPtr)
 	if err != nil {
 		plan.Errors = append(plan.Errors, err)
+		return
 	}
-	plan.where = append(plan.where, whereStr)
+	valStr := plan.table.dbmap.Dialect.BindVar(len(plan.args))
+	plan.where = append(plan.where, column + operator + valStr)
 	plan.args = append(plan.args, value)
 }
 
@@ -252,7 +252,7 @@ func (plan *QueryPlan) Set(fieldPtr interface{}, value interface{}) SetQuery {
 		plan.Errors = append(plan.Errors, err)
 		return &SetQueryPlan{QueryPlan: *plan}
 	}
-	plan.assignCols = append(plan.assignCols, plan.table.dbmap.Dialect.QuoteField(column.ColumnName))
+	plan.assignCols = append(plan.assignCols, column)
 	plan.assignBindVars = append(plan.assignBindVars, plan.table.dbmap.Dialect.BindVar(len(plan.args)))
 	plan.args = append(plan.args, value)
 	return &SetQueryPlan{QueryPlan: *plan}
@@ -293,8 +293,14 @@ func (plan *QueryPlan) OrderBy(fieldPtr interface{}, direction string) SelectQue
 		plan.Errors = append(plan.Errors, err)
 		return plan
 	}
-	plan.orderBy = column.ColumnName
-	plan.orderByDirection = direction
+	switch strings.ToLower(direction) {
+	case "asc", "desc":
+	case "":
+	default:
+		plan.Errors = append(plan.Errors, errors.New(`gorp: Order by direction must be empty string, "asc", or "desc"`))
+		return plan
+	}
+	plan.orderBy = append(plan.orderBy, column)
 	return plan
 }
 
@@ -304,7 +310,7 @@ func (plan *QueryPlan) GroupBy(fieldPtr interface{}) SelectQuery {
 		plan.Errors = append(plan.Errors, err)
 		return plan
 	}
-	plan.groupBy = column.ColumnName
+	plan.groupBy = append(plan.groupBy, column)
 	return plan
 }
 
@@ -342,21 +348,21 @@ func (plan *QueryPlan) Select() ([]interface{}, error) {
 		}
 		buffer.WriteString(whereEntry)
 	}
-	if plan.orderBy != "" {
-		buffer.WriteString(" order by ")
-		buffer.WriteString(plan.table.dbmap.Dialect.QuoteField(plan.orderBy))
-		switch strings.ToLower(plan.orderByDirection) {
-		case "desc", "asc":
-			buffer.WriteString(plan.orderByDirection)
-		case "":
-		default:
-			plan.Errors = append(plan.Errors, errors.New("gorp: Order by direction is invalid"))
-			return nil, plan.Errors[0]
+	for index, orderBy := range plan.orderBy {
+		if index == 0 {
+			buffer.WriteString(" order by ")
+		} else {
+			buffer.WriteString(", ")
 		}
+		buffer.WriteString(orderBy)
 	}
-	if plan.groupBy != "" {
-		buffer.WriteString(" group by ")
-		buffer.WriteString(plan.groupBy)
+	for index, groupBy := range plan.groupBy {
+		if index == 0 {
+			buffer.WriteString(" group by ")
+		} else {
+			buffer.WriteString(", ")
+		}
+		buffer.WriteString(groupBy)
 	}
 	if plan.limit > 0 {
 		buffer.WriteString(" limit ")
