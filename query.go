@@ -201,6 +201,7 @@ type Inserter interface {
 // A Selector is a query that can execute SELECT statements.
 type Selector interface {
 	Select() (results []interface{}, err error)
+	SelectToTarget(target interface{}) error
 }
 
 // A Receiver is a query that can execute statements with ORDER BY and
@@ -601,8 +602,27 @@ func (plan *QueryPlan) whereClause() (string, error) {
 
 // Select will run this query plan as a SELECT statement.
 func (plan *QueryPlan) Select() ([]interface{}, error) {
+	query, err := plan.selectQuery()
+	if err != nil {
+		return nil, err
+	}
+	return plan.executor.Select(plan.target.Interface(), query, plan.args...)
+}
+
+// SelectToTarget will run this query plan as a SELECT statement, and
+// append results directly to the passed in slice pointer.
+func (plan *QueryPlan) SelectToTarget(target interface{}) error {
+	query, err := plan.selectQuery()
+	if err != nil {
+		return err
+	}
+	_, err = plan.executor.Select(target, query, plan.args...)
+	return err
+}
+
+func (plan *QueryPlan) selectQuery() (string, error) {
 	if len(plan.Errors) > 0 {
-		return nil, plan.Errors[0]
+		return "", plan.Errors[0]
 	}
 	buffer := bytes.Buffer{}
 	buffer.WriteString("select ")
@@ -618,7 +638,7 @@ func (plan *QueryPlan) Select() ([]interface{}, error) {
 	buffer.WriteString(plan.table.dbmap.Dialect.QuotedTableForQuery(plan.table.SchemaName, plan.table.TableName))
 	whereClause, err := plan.whereClause()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	buffer.WriteString(whereClause)
 	for index, orderBy := range plan.orderBy {
@@ -647,7 +667,7 @@ func (plan *QueryPlan) Select() ([]interface{}, error) {
 		buffer.WriteString(plan.table.dbmap.Dialect.BindVar(len(plan.args)))
 		plan.args = append(plan.args, plan.offset)
 	}
-	return plan.executor.Select(plan.target.Interface(), buffer.String(), plan.args...)
+	return buffer.String(), nil
 }
 
 // Insert will run this query plan as an INSERT statement.
