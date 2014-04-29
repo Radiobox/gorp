@@ -73,20 +73,40 @@ func (filter *orFilter) Where(structMap structColumnMap, dialect Dialect, startB
 	return filter.joinFilters(" or ", structMap, dialect, startBindIdx)
 }
 
-// A comparisonFilter is a filter that compares a field to a value.
+// A comparisonFilter is a filter that compares two values.
 type comparisonFilter struct {
-	addr       interface{}
+	left       interface{}
 	comparison string
-	value      interface{}
+	right      interface{}
 }
 
 func (filter *comparisonFilter) Where(structMap structColumnMap, dialect Dialect, startBindIdx int) (string, []interface{}, error) {
-	column, err := structMap.columnForPointer(filter.addr)
-	if err != nil {
-		return "", nil, err
+	args := make([]interface{}, 0, 2)
+	comparison := bytes.Buffer{}
+	if reflect.ValueOf(filter.left).Kind() == reflect.Ptr {
+		column, err := structMap.tableColumnForPointer(filter.left)
+		if err != nil {
+			return "", nil, err
+		}
+		comparison.WriteString(column)
+	} else {
+		bindVar := dialect.BindVar(startBindIdx + len(args))
+		comparison.WriteString(bindVar)
+		args = append(args, filter.left)
 	}
-	bindVar := dialect.BindVar(startBindIdx)
-	return column + filter.comparison + bindVar, []interface{}{filter.value}, nil
+	comparison.WriteString(filter.comparison)
+	if reflect.ValueOf(filter.right).Kind() == reflect.Ptr {
+		column, err := structMap.tableColumnForPointer(filter.right)
+		if err != nil {
+			return "", nil, err
+		}
+		comparison.WriteString(column)
+	} else {
+		bindVar := dialect.BindVar(startBindIdx + len(args))
+		comparison.WriteString(bindVar)
+		args = append(args, filter.right)
+	}
+	return comparison.String(), args, nil
 }
 
 // A notFilter is a filter that inverts another filter.
@@ -108,7 +128,7 @@ type nullFilter struct {
 }
 
 func (filter *nullFilter) Where(structMap structColumnMap, dialect Dialect, startBindIdx int) (string, []interface{}, error) {
-	column, err := structMap.columnForPointer(filter.addr)
+	column, err := structMap.tableColumnForPointer(filter.addr)
 	if err != nil {
 		return "", nil, err
 	}
@@ -121,7 +141,7 @@ type notNullFilter struct {
 }
 
 func (filter *notNullFilter) Where(structMap structColumnMap, dialect Dialect, startBindIdx int) (string, []interface{}, error) {
-	column, err := structMap.columnForPointer(filter.addr)
+	column, err := structMap.tableColumnForPointer(filter.addr)
 	if err != nil {
 		return "", nil, err
 	}
@@ -218,6 +238,10 @@ type Assigner interface {
 	Assign(fieldPtr interface{}, value interface{}) AssignQuery
 }
 
+type Joiner interface {
+	Join(table interface{}) JoinQuery
+}
+
 // A Wherer is a query that can execute statements with a WHERE
 // clause.
 type Wherer interface {
@@ -260,6 +284,14 @@ type AssignQuery interface {
 	Where() UpdateQuery
 	Inserter
 	Updater
+}
+
+// A JoinQuery is a query that uses join operations to compare values
+// between tables.
+type JoinQuery interface {
+	Joiner
+	On(filter Filter) JoinQuery
+	Wherer
 }
 
 // A WhereQuery is a query that does not set any values, but may have
@@ -318,6 +350,7 @@ type Query interface {
 	// A query that has had no methods called can both perform
 	// assignments and still have a where clause.
 	Assigner
+	Joiner
 	Wherer
 
 	// Updates and inserts need at least one assignment, so they won't
@@ -344,6 +377,10 @@ type fieldColumnMap struct {
 	// points to.
 	column *ColumnMap
 
+	// quotedTable should be the pre-quoted table string for this
+	// column.
+	quotedTable string
+
 	// quotedColumn should be the pre-quoted column string for this
 	// column.
 	quotedColumn string
@@ -356,15 +393,38 @@ type structColumnMap []fieldColumnMap
 // reference for query construction) and returns the pre-quoted column
 // name that should be used to reference that value in queries.
 func (structMap structColumnMap) columnForPointer(fieldPtr interface{}) (string, error) {
+	fieldMap, err := structMap.fieldMapForPointer(fieldPtr)
+	if err != nil {
+		return "", err
+	}
+	return fieldMap.quotedColumn, nil
+}
+
+// tableColumnForPointer takes an interface value (which should be a
+// pointer to one of the fields on the value that is being used as a
+// reference for query construction) and returns the pre-quoted
+// table.column name that should be used to reference that value in
+// some types of queries (mostly where statements and select queries).
+func (structMap structColumnMap) tableColumnForPointer(fieldPtr interface{}) (string, error) {
+	fieldMap, err := structMap.fieldMapForPointer(fieldPtr)
+	if err != nil {
+		return "", err
+	}
+	return fieldMap.quotedTable + "." + fieldMap.quotedColumn, nil
+}
+
+// fieldMapForPointer takes a pointer to a struct field and returns
+// the fieldColumnMap for that struct field.
+func (structMap structColumnMap) fieldMapForPointer(fieldPtr interface{}) (*fieldColumnMap, error) {
 	for _, fieldMap := range structMap {
 		if fieldMap.addr == fieldPtr {
 			if fieldMap.column.Transient {
-				return "", errors.New("gorp: Cannot run queries against transient columns")
+				return nil, errors.New("gorp: Cannot run queries against transient columns")
 			}
-			return fieldMap.quotedColumn, nil
+			return &fieldMap, nil
 		}
 	}
-	return "", errors.New("gorp: Cannot find a field matching the passed in pointer")
+	return nil, errors.New("gorp: Cannot find a field matching the passed in pointer")
 }
 
 // A QueryPlan is a Query.  It returns itself on most method calls;
@@ -402,6 +462,9 @@ type QueryPlan struct {
 	Errors []error
 
 	table          *TableMap
+	joinClause     string
+	joinFilters    *andFilter
+	dbMap          *DbMap
 	executor       SqlExecutor
 	target         reflect.Value
 	targetColMap   structColumnMap
@@ -420,27 +483,35 @@ type QueryPlan struct {
 // reference for query construction.
 func query(m *DbMap, exec SqlExecutor, target interface{}) Query {
 	plan := &QueryPlan{
+		dbMap:    m,
 		executor: exec,
 	}
 
 	targetVal := reflect.ValueOf(target)
-	if targetVal.Kind() != reflect.Ptr || targetVal.Elem().Kind() != reflect.Struct {
-		plan.Errors = append(plan.Errors, errors.New("gorp: Cannot create query plan - target value must be a pointer to a struct"))
-		return plan
-	}
-	plan.target = targetVal
-
-	targetTable, err := m.tableFor(plan.target.Type().Elem(), false)
+	targetTable, err := plan.mapTable(targetVal)
 	if err != nil {
 		plan.Errors = append(plan.Errors, err)
 		return plan
 	}
+	plan.target = targetVal
 	plan.table = targetTable
-
-	if err = plan.mapColumns(plan.target); err != nil {
-		plan.Errors = append(plan.Errors, err)
-	}
 	return plan
+}
+
+func (plan *QueryPlan) mapTable(targetVal reflect.Value) (*TableMap, error) {
+	if targetVal.Kind() != reflect.Ptr || targetVal.Elem().Kind() != reflect.Struct {
+		return nil, errors.New("gorp: Cannot create query plan - target value must be a pointer to a struct")
+	}
+
+	targetTable, err := plan.dbMap.tableFor(targetVal.Type().Elem(), false)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = plan.mapColumns(targetTable, targetVal); err != nil {
+		return nil, err
+	}
+	return targetTable, nil
 }
 
 // mapColumns creates a list of field addresses and column maps, to
@@ -448,12 +519,13 @@ func query(m *DbMap, exec SqlExecutor, target interface{}) Query {
 // it doesn't do any special handling for overridden fields, because
 // passing the address of a field that has been overridden is
 // difficult to do accidentally.
-func (plan *QueryPlan) mapColumns(value reflect.Value) (err error) {
+func (plan *QueryPlan) mapColumns(table *TableMap, value reflect.Value) (err error) {
 	value = value.Elem()
 	valueType := value.Type()
 	if plan.targetColMap == nil {
 		plan.targetColMap = make(structColumnMap, 0, value.NumField())
 	}
+	quotedTableName := table.dbmap.Dialect.QuotedTableForQuery(table.SchemaName, table.TableName)
 	for i := 0; i < value.NumField(); i++ {
 		fieldType := valueType.Field(i)
 		fieldVal := value.Field(i)
@@ -461,13 +533,14 @@ func (plan *QueryPlan) mapColumns(value reflect.Value) (err error) {
 			if fieldVal.Kind() != reflect.Ptr {
 				fieldVal = fieldVal.Addr()
 			}
-			plan.mapColumns(fieldVal)
+			plan.mapColumns(table, fieldVal)
 		} else {
-			col := plan.table.ColMap(fieldType.Name)
-			quotedCol := plan.table.dbmap.Dialect.QuoteField(col.ColumnName)
+			col := table.ColMap(fieldType.Name)
+			quotedCol := table.dbmap.Dialect.QuoteField(col.ColumnName)
 			fieldMap := fieldColumnMap{
 				addr:         fieldVal.Addr().Interface(),
 				column:       col,
+				quotedTable:  quotedTableName,
 				quotedColumn: quotedCol,
 			}
 			plan.targetColMap = append(plan.targetColMap, fieldMap)
@@ -484,10 +557,50 @@ func (plan *QueryPlan) Assign(fieldPtr interface{}, value interface{}) AssignQue
 	return assignPlan.Assign(fieldPtr, value)
 }
 
+func (plan *QueryPlan) writeJoinFilters() error {
+	if plan.joinFilters != nil {
+		clause, args, err := plan.joinFilters.Where(plan.targetColMap, plan.table.dbmap.Dialect, len(plan.args))
+		if err != nil {
+			return err
+		}
+		if clause != "" {
+			plan.args = append(plan.args, args...)
+			plan.joinClause += " on " + clause
+		}
+		plan.joinFilters = nil
+	}
+	return nil
+}
+
+func (plan *QueryPlan) Join(target interface{}) JoinQuery {
+	table, err := plan.mapTable(reflect.ValueOf(target))
+	if err != nil {
+		plan.Errors = append(plan.Errors, err)
+		return plan
+	}
+	if err = plan.writeJoinFilters(); err != nil {
+		plan.Errors = append(plan.Errors, err)
+		return plan
+	}
+	plan.joinClause += " inner join " + table.dbmap.Dialect.QuotedTableForQuery(table.SchemaName, table.TableName)
+	return plan
+}
+
+func (plan *QueryPlan) On(filter Filter) JoinQuery {
+	if plan.joinFilters == nil {
+		plan.joinFilters = new(andFilter)
+	}
+	plan.joinFilters.Add(filter)
+	return plan
+}
+
 // Where doesn't do anything more than simply switching to where
 // clause generation.  This is mainly here to make syntax cleaner,
 // because queries are harder to read without it.
 func (plan *QueryPlan) Where() WhereQuery {
+	if err := plan.writeJoinFilters(); err != nil {
+		plan.Errors = append(plan.Errors, err)
+	}
 	return plan
 }
 
@@ -549,7 +662,7 @@ func (plan *QueryPlan) NotNull(fieldPtr interface{}) WhereQuery {
 // optional - you may pass in an empty string to order in the default
 // direction for the given column.
 func (plan *QueryPlan) OrderBy(fieldPtr interface{}, direction string) SelectQuery {
-	column, err := plan.targetColMap.columnForPointer(fieldPtr)
+	column, err := plan.targetColMap.tableColumnForPointer(fieldPtr)
 	if err != nil {
 		plan.Errors = append(plan.Errors, err)
 		return plan
@@ -567,7 +680,7 @@ func (plan *QueryPlan) OrderBy(fieldPtr interface{}, direction string) SelectQue
 
 // GroupBy adds a column to the group by clause.
 func (plan *QueryPlan) GroupBy(fieldPtr interface{}) SelectQuery {
-	column, err := plan.targetColMap.columnForPointer(fieldPtr)
+	column, err := plan.targetColMap.tableColumnForPointer(fieldPtr)
 	if err != nil {
 		plan.Errors = append(plan.Errors, err)
 		return plan
@@ -612,6 +725,10 @@ func (plan *QueryPlan) Select() ([]interface{}, error) {
 // SelectToTarget will run this query plan as a SELECT statement, and
 // append results directly to the passed in slice pointer.
 func (plan *QueryPlan) SelectToTarget(target interface{}) error {
+	targetType := reflect.TypeOf(target)
+	if targetType.Kind() != reflect.Ptr || targetType.Elem().Kind() != reflect.Slice {
+		return errors.New("SelectToTarget must be run with a pointer to a slice as its target")
+	}
 	query, err := plan.selectQuery()
 	if err != nil {
 		return err
@@ -624,6 +741,7 @@ func (plan *QueryPlan) selectQuery() (string, error) {
 	if len(plan.Errors) > 0 {
 		return "", plan.Errors[0]
 	}
+	quotedTable := plan.table.dbmap.Dialect.QuotedTableForQuery(plan.table.SchemaName, plan.table.TableName)
 	buffer := bytes.Buffer{}
 	buffer.WriteString("select ")
 	for index, col := range plan.table.columns {
@@ -631,11 +749,16 @@ func (plan *QueryPlan) selectQuery() (string, error) {
 			if index != 0 {
 				buffer.WriteString(",")
 			}
+			buffer.WriteString(quotedTable)
+			buffer.WriteString(".")
 			buffer.WriteString(plan.table.dbmap.Dialect.QuoteField(col.ColumnName))
 		}
 	}
 	buffer.WriteString(" from ")
-	buffer.WriteString(plan.table.dbmap.Dialect.QuotedTableForQuery(plan.table.SchemaName, plan.table.TableName))
+	buffer.WriteString(quotedTable)
+	if plan.joinClause != "" {
+		buffer.WriteString(plan.joinClause)
+	}
 	whereClause, err := plan.whereClause()
 	if err != nil {
 		return "", err
