@@ -392,7 +392,7 @@ func (plan *QueryPlan) mapColumns(table *TableMap, value reflect.Value) (err err
 				fieldVal = fieldVal.Addr()
 			}
 			plan.mapColumns(table, fieldVal)
-		} else {
+		} else if fieldType.PkgPath == "" {
 			col := table.ColMap(fieldType.Name)
 			quotedCol := table.dbmap.Dialect.QuoteField(col.ColumnName)
 			fieldMap := fieldColumnMap{
