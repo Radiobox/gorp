@@ -677,6 +677,23 @@ func (plan *QueryPlan) Insert() error {
 	return err
 }
 
+// joinFromAndWhereClause will return the from and where clauses for
+// joined tables, for use in UPDATE and DELETE statements.
+func (plan *QueryPlan) joinFromAndWhereClause() (from, where string, err error) {
+	fromSlice := make([]string, 0, len(plan.joins))
+	whereBuffer := bytes.Buffer{}
+	for _, join := range plan.joins {
+		fromSlice = append(fromSlice, join.quotedJoinTable)
+		whereClause, whereArgs, err := join.Where(plan.colMap, plan.table.dbmap.Dialect, len(plan.args))
+		if err != nil {
+			return "", "", err
+		}
+		whereBuffer.WriteString(whereClause)
+		plan.args = append(plan.args, whereArgs...)
+	}
+	return strings.Join(fromSlice, ", "), whereBuffer.String(), nil
+}
+
 // Update will run this query plan as an UPDATE statement.
 func (plan *QueryPlan) Update() (int64, error) {
 	if len(plan.Errors) > 0 {
@@ -695,9 +712,23 @@ func (plan *QueryPlan) Update() (int64, error) {
 		buffer.WriteString("=")
 		buffer.WriteString(bindVar)
 	}
+	joinTables, joinWhereClause, err := plan.joinFromAndWhereClause()
+	if err != nil {
+		return -1, nil
+	}
+	if joinTables != "" {
+		buffer.WriteString(" from ")
+		buffer.WriteString(joinTables)
+	}
 	whereClause, err := plan.whereClause()
 	if err != nil {
 		return -1, err
+	}
+	if joinWhereClause != "" {
+		if whereClause == "" {
+			whereClause = " where"
+		}
+		whereClause += " " + joinWhereClause
 	}
 	buffer.WriteString(whereClause)
 	res, err := plan.executor.Exec(buffer.String(), plan.args...)
@@ -719,9 +750,23 @@ func (plan *QueryPlan) Delete() (int64, error) {
 	buffer := bytes.Buffer{}
 	buffer.WriteString("delete from ")
 	buffer.WriteString(plan.table.dbmap.Dialect.QuotedTableForQuery(plan.table.SchemaName, plan.table.TableName))
+	joinTables, joinWhereClause, err := plan.joinFromAndWhereClause()
+	if err != nil {
+		return -1, err
+	}
+	if joinTables != "" {
+		buffer.WriteString(" using ")
+		buffer.WriteString(joinTables)
+	}
 	whereClause, err := plan.whereClause()
 	if err != nil {
 		return -1, err
+	}
+	if joinWhereClause != "" {
+		if whereClause == "" {
+			whereClause = " where"
+		}
+		whereClause += " " + joinWhereClause
 	}
 	buffer.WriteString(whereClause)
 	res, err := plan.executor.Exec(buffer.String(), plan.args...)
