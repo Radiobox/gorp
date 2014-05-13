@@ -7,202 +7,6 @@ import (
 	"strings"
 )
 
-// A Filter is a type that can be used as a sub-section of a where
-// clause.
-type Filter interface {
-	// Where should take a structColumnMap, a dialect, and the index
-	// to start binding at, and return the string to be added to the
-	// where clause, a slice of query arguments in the where clause,
-	// and any errors encountered.
-	Where(structMap structColumnMap, dialect Dialect, startBindIdx int) (string, []interface{}, error)
-}
-
-// A combinedFilter is a filter that has more than one sub-filter.
-// This is mainly for things like AND or OR operations.
-type combinedFilter struct {
-	subFilters []Filter
-}
-
-// joinFilters joins all of the sub-filters' where clauses into a
-// single where clause.
-func (filter *combinedFilter) joinFilters(separator string, structMap structColumnMap, dialect Dialect, startBindIdx int) (string, []interface{}, error) {
-	buffer := bytes.Buffer{}
-	args := make([]interface{}, 0, len(filter.subFilters))
-	if len(filter.subFilters) > 1 {
-		buffer.WriteString("(")
-	}
-	for index, subFilter := range filter.subFilters {
-		nextWhere, nextArgs, err := subFilter.Where(structMap, dialect, startBindIdx+len(args))
-		if err != nil {
-			return "", nil, err
-		}
-		args = append(args, nextArgs...)
-		if index != 0 {
-			buffer.WriteString(separator)
-		}
-		buffer.WriteString(nextWhere)
-	}
-	if len(filter.subFilters) > 1 {
-		buffer.WriteString(")")
-	}
-	return buffer.String(), args, nil
-}
-
-// Add adds one or more filters to the slice of sub-filters.
-func (filter *combinedFilter) Add(filters ...Filter) {
-	filter.subFilters = append(filter.subFilters, filters...)
-}
-
-// An andFilter is a combinedFilter that will have its sub-filters
-// joined using AND.
-type andFilter struct {
-	combinedFilter
-}
-
-func (filter *andFilter) Where(structMap structColumnMap, dialect Dialect, startBindIdx int) (string, []interface{}, error) {
-	return filter.joinFilters(" and ", structMap, dialect, startBindIdx)
-}
-
-// An orFilter is a combinedFilter that will have its sub-filters
-// joined using OR.
-type orFilter struct {
-	combinedFilter
-}
-
-func (filter *orFilter) Where(structMap structColumnMap, dialect Dialect, startBindIdx int) (string, []interface{}, error) {
-	return filter.joinFilters(" or ", structMap, dialect, startBindIdx)
-}
-
-// A comparisonFilter is a filter that compares two values.
-type comparisonFilter struct {
-	left       interface{}
-	comparison string
-	right      interface{}
-}
-
-func (filter *comparisonFilter) Where(structMap structColumnMap, dialect Dialect, startBindIdx int) (string, []interface{}, error) {
-	args := make([]interface{}, 0, 2)
-	comparison := bytes.Buffer{}
-	if reflect.ValueOf(filter.left).Kind() == reflect.Ptr {
-		column, err := structMap.tableColumnForPointer(filter.left)
-		if err != nil {
-			return "", nil, err
-		}
-		comparison.WriteString(column)
-	} else {
-		bindVar := dialect.BindVar(startBindIdx + len(args))
-		comparison.WriteString(bindVar)
-		args = append(args, filter.left)
-	}
-	comparison.WriteString(filter.comparison)
-	if reflect.ValueOf(filter.right).Kind() == reflect.Ptr {
-		column, err := structMap.tableColumnForPointer(filter.right)
-		if err != nil {
-			return "", nil, err
-		}
-		comparison.WriteString(column)
-	} else {
-		bindVar := dialect.BindVar(startBindIdx + len(args))
-		comparison.WriteString(bindVar)
-		args = append(args, filter.right)
-	}
-	return comparison.String(), args, nil
-}
-
-// A notFilter is a filter that inverts another filter.
-type notFilter struct {
-	filter Filter
-}
-
-func (filter *notFilter) Where(structMap structColumnMap, dialect Dialect, startBindIdx int) (string, []interface{}, error) {
-	whereStr, args, err := filter.filter.Where(structMap, dialect, startBindIdx)
-	if err != nil {
-		return "", nil, err
-	}
-	return "NOT " + whereStr, args, nil
-}
-
-// A nullFilter is a filter that compares a field to null
-type nullFilter struct {
-	addr interface{}
-}
-
-func (filter *nullFilter) Where(structMap structColumnMap, dialect Dialect, startBindIdx int) (string, []interface{}, error) {
-	column, err := structMap.tableColumnForPointer(filter.addr)
-	if err != nil {
-		return "", nil, err
-	}
-	return column + " IS NULL", nil, nil
-}
-
-// A notNullFilter is a filter that compares a field to null
-type notNullFilter struct {
-	addr interface{}
-}
-
-func (filter *notNullFilter) Where(structMap structColumnMap, dialect Dialect, startBindIdx int) (string, []interface{}, error) {
-	column, err := structMap.tableColumnForPointer(filter.addr)
-	if err != nil {
-		return "", nil, err
-	}
-	return column + " IS NOT NULL", nil, nil
-}
-
-// Or returns a filter that will OR all passed in filters
-func Or(filters ...Filter) Filter {
-	return &orFilter{combinedFilter{filters}}
-}
-
-// And returns a filter that will AND all passed in filters
-func And(filters ...Filter) Filter {
-	return &andFilter{combinedFilter{filters}}
-}
-
-// Not returns a filter that will NOT the passed in filter
-func Not(filter Filter) Filter {
-	return &notFilter{filter}
-}
-
-// Null returns a filter for fieldPtr IS NULL
-func Null(fieldPtr interface{}) Filter {
-	return &nullFilter{fieldPtr}
-}
-
-// NotNull returns a filter for fieldPtr IS NOT NULL
-func NotNull(fieldPtr interface{}) Filter {
-	return &notNullFilter{fieldPtr}
-}
-
-// Equal returns a filter for fieldPtr == value
-func Equal(fieldPtr interface{}, value interface{}) Filter {
-	return &comparisonFilter{fieldPtr, "=", value}
-}
-
-// NotEqual returns a filter for fieldPtr != value
-func NotEqual(fieldPtr interface{}, value interface{}) Filter {
-	return &comparisonFilter{fieldPtr, "!=", value}
-}
-
-// Less returns a filter for fieldPtr < value
-func Less(fieldPtr interface{}, value interface{}) Filter {
-	return &comparisonFilter{fieldPtr, "<", value}
-}
-
-// LessOrEqual returns a filter for fieldPtr <= value
-func LessOrEqual(fieldPtr interface{}, value interface{}) Filter {
-	return &comparisonFilter{fieldPtr, "<=", value}
-}
-
-// Greater returns a filter for fieldPtr > value
-func Greater(fieldPtr interface{}, value interface{}) Filter {
-	return &comparisonFilter{fieldPtr, "=", value}
-}
-
-// GreaterOrEqual returns a filter for fieldPtr >= value
-func GreaterOrEqual(fieldPtr interface{}, value interface{}) Filter {
-	return &comparisonFilter{fieldPtr, "=", value}
-}
-
 // An Updater is a query that can execute UPDATE statements.
 type Updater interface {
 	Update() (rowsUpdated int64, err error)
@@ -220,13 +24,18 @@ type Inserter interface {
 
 // A Selector is a query that can execute SELECT statements.
 type Selector interface {
+	// Execute the select statement, return the results as a slice of
+	// the type that was used to create the query.
 	Select() (results []interface{}, err error)
+
+	// Execute the select statement, but use the passed in slice
+	// pointer as the target to append to.
 	SelectToTarget(target interface{}) error
 }
 
-// A Receiver is a query that can execute statements with ORDER BY and
-// GROUP BY clauses.
-type Receiver interface {
+// A SelectManipulator is a query that will return a list of results
+// which can be manipulated.
+type SelectManipulator interface {
 	OrderBy(fieldPtr interface{}, direction string) SelectQuery
 	GroupBy(fieldPtr interface{}) SelectQuery
 	Limit(int64) SelectQuery
@@ -238,8 +47,15 @@ type Assigner interface {
 	Assign(fieldPtr interface{}, value interface{}) AssignQuery
 }
 
+// A Joiner is a query that can add tables as join clauses.
 type Joiner interface {
 	Join(table interface{}) JoinQuery
+}
+
+// An AssignJoiner is a Joiner with an assigner return type, for
+// insert or update statements with a FROM clause.
+type AssignJoiner interface {
+	Join(table interface{}) AssignJoinQuery
 }
 
 // A Wherer is a query that can execute statements with a WHERE
@@ -248,9 +64,14 @@ type Wherer interface {
 	Where() WhereQuery
 }
 
+// An AssignWherer is a Wherer with an assigner return type.
+type AssignWherer interface{
+	Where() UpdateQuery
+}
+
 // A SelectQuery is a query that can only execute SELECT statements.
 type SelectQuery interface {
-	Receiver
+	SelectManipulator
 	Selector
 }
 
@@ -281,8 +102,29 @@ type UpdateQuery interface {
 // An AssignQuery is a query that may set values.
 type AssignQuery interface {
 	Assigner
-	Where() UpdateQuery
+	AssignJoiner
+	AssignWherer
 	Inserter
+	Updater
+}
+
+// An AssignJoinQuery is a clone of JoinQuery, but for UPDATE and
+// INSERT statements instead of DELETE and SELECT.
+type AssignJoinQuery interface {
+	AssignJoiner
+
+	On(filter Filter) AssignJoinQuery
+
+	Equal(fieldPtr interface{}, value interface{}) AssignJoinQuery
+	NotEqual(fieldPtr interface{}, value interface{}) AssignJoinQuery
+	Less(fieldPtr interface{}, value interface{}) AssignJoinQuery
+	LessOrEqual(fieldPtr interface{}, value interface{}) AssignJoinQuery
+	Greater(fieldPtr interface{}, value interface{}) AssignJoinQuery
+	GreaterOrEqual(fieldPtr interface{}, value interface{}) AssignJoinQuery
+	NotNull(fieldPtr interface{}) AssignJoinQuery
+	Null(fieldPtr interface{}) AssignJoinQuery
+
+	AssignWherer
 	Updater
 }
 
@@ -290,8 +132,25 @@ type AssignQuery interface {
 // between tables.
 type JoinQuery interface {
 	Joiner
+
+	// On for a JoinQuery is equivalent to Filter for a WhereQuery.
 	On(filter Filter) JoinQuery
+
+	// These methods should be roughly equivalent to those of a
+	// WhereQuery, except they add to the ON clause instead of the
+	// WHERE clause.
+	Equal(fieldPtr interface{}, value interface{}) JoinQuery
+	NotEqual(fieldPtr interface{}, value interface{}) JoinQuery
+	Less(fieldPtr interface{}, value interface{}) JoinQuery
+	LessOrEqual(fieldPtr interface{}, value interface{}) JoinQuery
+	Greater(fieldPtr interface{}, value interface{}) JoinQuery
+	GreaterOrEqual(fieldPtr interface{}, value interface{}) JoinQuery
+	NotNull(fieldPtr interface{}) JoinQuery
+	Null(fieldPtr interface{}) JoinQuery
+
 	Wherer
+	Deleter
+	Selector
 }
 
 // A WhereQuery is a query that does not set any values, but may have
@@ -318,7 +177,7 @@ type WhereQuery interface {
 	// right off the bat, which means there have been no calls to
 	// Assign.  Only delete and select statements can have a where
 	// clause without doing assignment.
-	Receiver
+	SelectManipulator
 	Deleter
 	Selector
 }
@@ -363,7 +222,7 @@ type Query interface {
 	// to prevent people from just deleting everything in their table.
 	// On the other hand, they should be checking the count they get
 	// back to ensure they deleted exactly what they wanted to delete.
-	Receiver
+	SelectManipulator
 	Deleter
 	Selector
 }
@@ -462,15 +321,14 @@ type QueryPlan struct {
 	Errors []error
 
 	table          *TableMap
-	joinClause     string
-	joinFilters    *andFilter
 	dbMap          *DbMap
 	executor       SqlExecutor
 	target         reflect.Value
-	targetColMap   structColumnMap
+	colMap         structColumnMap
+	joins          []*joinFilter
 	assignCols     []string
 	assignBindVars []string
-	filters        *andFilter
+	filters        MultiFilter
 	orderBy        []string
 	groupBy        []string
 	limit          int64
@@ -522,8 +380,8 @@ func (plan *QueryPlan) mapTable(targetVal reflect.Value) (*TableMap, error) {
 func (plan *QueryPlan) mapColumns(table *TableMap, value reflect.Value) (err error) {
 	value = value.Elem()
 	valueType := value.Type()
-	if plan.targetColMap == nil {
-		plan.targetColMap = make(structColumnMap, 0, value.NumField())
+	if plan.colMap == nil {
+		plan.colMap = make(structColumnMap, 0, value.NumField())
 	}
 	quotedTableName := table.dbmap.Dialect.QuotedTableForQuery(table.SchemaName, table.TableName)
 	for i := 0; i < value.NumField(); i++ {
@@ -543,7 +401,7 @@ func (plan *QueryPlan) mapColumns(table *TableMap, value reflect.Value) (err err
 				quotedTable:  quotedTableName,
 				quotedColumn: quotedCol,
 			}
-			plan.targetColMap = append(plan.targetColMap, fieldMap)
+			plan.colMap = append(plan.colMap, fieldMap)
 		}
 	}
 	return
@@ -553,54 +411,41 @@ func (plan *QueryPlan) mapColumns(table *TableMap, value reflect.Value) (err err
 // value to the passed in field pointer.  This is used for creating
 // UPDATE or INSERT queries.
 func (plan *QueryPlan) Assign(fieldPtr interface{}, value interface{}) AssignQuery {
-	assignPlan := &AssignQueryPlan{QueryPlan: *plan}
+	assignPlan := &AssignQueryPlan{QueryPlan: plan}
 	return assignPlan.Assign(fieldPtr, value)
 }
 
-func (plan *QueryPlan) writeJoinFilters() error {
-	if plan.joinFilters != nil {
-		clause, args, err := plan.joinFilters.Where(plan.targetColMap, plan.table.dbmap.Dialect, len(plan.args))
-		if err != nil {
-			return err
+func (plan *QueryPlan) storeJoin() {
+	if lastJoinFilter, ok := plan.filters.(*joinFilter); ok {
+		if plan.joins == nil {
+			plan.joins = make([]*joinFilter, 0, 2)
 		}
-		if clause != "" {
-			plan.args = append(plan.args, args...)
-			plan.joinClause += " on " + clause
-		}
-		plan.joinFilters = nil
+		plan.joins = append(plan.joins, lastJoinFilter)
+		plan.filters = nil
 	}
-	return nil
 }
 
 func (plan *QueryPlan) Join(target interface{}) JoinQuery {
+	plan.storeJoin()
 	table, err := plan.mapTable(reflect.ValueOf(target))
 	if err != nil {
 		plan.Errors = append(plan.Errors, err)
-		return plan
 	}
-	if err = plan.writeJoinFilters(); err != nil {
-		plan.Errors = append(plan.Errors, err)
-		return plan
-	}
-	plan.joinClause += " inner join " + table.dbmap.Dialect.QuotedTableForQuery(table.SchemaName, table.TableName)
-	return plan
+	quotedTable := table.dbmap.Dialect.QuotedTableForQuery(table.SchemaName, table.TableName)
+	plan.filters = &joinFilter{quotedJoinTable: quotedTable}
+	return &JoinQueryPlan{QueryPlan: plan}
 }
 
 func (plan *QueryPlan) On(filter Filter) JoinQuery {
-	if plan.joinFilters == nil {
-		plan.joinFilters = new(andFilter)
-	}
-	plan.joinFilters.Add(filter)
-	return plan
+	plan.filters.Add(filter)
+	return &JoinQueryPlan{QueryPlan: plan}
 }
 
-// Where doesn't do anything more than simply switching to where
-// clause generation.  This is mainly here to make syntax cleaner,
-// because queries are harder to read without it.
+// Where stores any join filter and allocates a new and filter to use
+// for WHERE clause creation.
 func (plan *QueryPlan) Where() WhereQuery {
-	if err := plan.writeJoinFilters(); err != nil {
-		plan.Errors = append(plan.Errors, err)
-	}
+	plan.storeJoin()
+	plan.filters = new(andFilter)
 	return plan
 }
 
@@ -608,12 +453,9 @@ func (plan *QueryPlan) Where() WhereQuery {
 // default method of combining filters on a query is by AND - if you
 // want OR, you can use the following syntax:
 //
-//     q = q.Filter(gorp.Or(gorp.Equal(&field.Id, id), gorp.Less(&field.Priority, 3)))
+//     query.Filter(gorp.Or(gorp.Equal(&field.Id, id), gorp.Less(&field.Priority, 3)))
 //
 func (plan *QueryPlan) Filter(filter Filter) WhereQuery {
-	if plan.filters == nil {
-		plan.filters = new(andFilter)
-	}
 	plan.filters.Add(filter)
 	return plan
 }
@@ -662,7 +504,7 @@ func (plan *QueryPlan) NotNull(fieldPtr interface{}) WhereQuery {
 // optional - you may pass in an empty string to order in the default
 // direction for the given column.
 func (plan *QueryPlan) OrderBy(fieldPtr interface{}, direction string) SelectQuery {
-	column, err := plan.targetColMap.tableColumnForPointer(fieldPtr)
+	column, err := plan.colMap.tableColumnForPointer(fieldPtr)
 	if err != nil {
 		plan.Errors = append(plan.Errors, err)
 		return plan
@@ -680,7 +522,7 @@ func (plan *QueryPlan) OrderBy(fieldPtr interface{}, direction string) SelectQue
 
 // GroupBy adds a column to the group by clause.
 func (plan *QueryPlan) GroupBy(fieldPtr interface{}) SelectQuery {
-	column, err := plan.targetColMap.tableColumnForPointer(fieldPtr)
+	column, err := plan.colMap.tableColumnForPointer(fieldPtr)
 	if err != nil {
 		plan.Errors = append(plan.Errors, err)
 		return plan
@@ -702,7 +544,7 @@ func (plan *QueryPlan) Offset(offset int64) SelectQuery {
 }
 
 func (plan *QueryPlan) whereClause() (string, error) {
-	where, whereArgs, err := plan.filters.Where(plan.targetColMap, plan.table.dbmap.Dialect, len(plan.args))
+	where, whereArgs, err := plan.filters.Where(plan.colMap, plan.table.dbmap.Dialect, len(plan.args))
 	if err != nil {
 		return "", err
 	}
@@ -711,6 +553,19 @@ func (plan *QueryPlan) whereClause() (string, error) {
 		return " where " + where, nil
 	}
 	return "", nil
+}
+
+func (plan *QueryPlan) selectJoinClause() (string, error) {
+	buffer := bytes.Buffer{}
+	for _, join := range plan.joins {
+		joinClause, joinArgs, err := join.JoinClause(plan.colMap, plan.table.dbmap.Dialect, len(plan.args))
+		if err != nil {
+			return "", err
+		}
+		buffer.WriteString(joinClause)
+		plan.args = append(plan.args, joinArgs...)
+	}
+	return buffer.String(), nil
 }
 
 // Select will run this query plan as a SELECT statement.
@@ -756,9 +611,11 @@ func (plan *QueryPlan) selectQuery() (string, error) {
 	}
 	buffer.WriteString(" from ")
 	buffer.WriteString(quotedTable)
-	if plan.joinClause != "" {
-		buffer.WriteString(plan.joinClause)
+	joinClause, err := plan.selectJoinClause()
+	if err != nil {
+		return "", err
 	}
+	buffer.WriteString(joinClause)
 	whereClause, err := plan.whereClause()
 	if err != nil {
 		return "", err
@@ -878,6 +735,52 @@ func (plan *QueryPlan) Delete() (int64, error) {
 	return rows, nil
 }
 
+// A JoinQueryPlan is a QueryPlan, except with some return values
+// changed so that it will match the JoinQuery interface.
+type JoinQueryPlan struct {
+	*QueryPlan
+}
+
+func (plan *JoinQueryPlan) Equal(fieldPtr interface{}, value interface{}) JoinQuery {
+	plan.QueryPlan.Equal(fieldPtr, value)
+	return plan
+}
+
+func (plan *JoinQueryPlan) NotEqual(fieldPtr interface{}, value interface{}) JoinQuery {
+	plan.QueryPlan.NotEqual(fieldPtr, value)
+	return plan
+}
+
+func (plan *JoinQueryPlan) Less(fieldPtr interface{}, value interface{}) JoinQuery {
+	plan.QueryPlan.Less(fieldPtr, value)
+	return plan
+}
+
+func (plan *JoinQueryPlan) LessOrEqual(fieldPtr interface{}, value interface{}) JoinQuery {
+	plan.QueryPlan.LessOrEqual(fieldPtr, value)
+	return plan
+}
+
+func (plan *JoinQueryPlan) Greater(fieldPtr interface{}, value interface{}) JoinQuery {
+	plan.QueryPlan.Greater(fieldPtr, value)
+	return plan
+}
+
+func (plan *JoinQueryPlan) GreaterOrEqual(fieldPtr interface{}, value interface{}) JoinQuery {
+	plan.QueryPlan.GreaterOrEqual(fieldPtr, value)
+	return plan
+}
+
+func (plan *JoinQueryPlan) Null(fieldPtr interface{}) JoinQuery {
+	plan.QueryPlan.Null(fieldPtr)
+	return plan
+}
+
+func (plan *JoinQueryPlan) NotNull(fieldPtr interface{}) JoinQuery {
+	plan.QueryPlan.NotNull(fieldPtr)
+	return plan
+}
+
 // An AssignQueryPlan is, for all intents and purposes, a QueryPlan.
 // The only difference is the return type of Where() and all of the
 // various where clause operations.  This is intended to be used for
@@ -887,11 +790,11 @@ func (plan *QueryPlan) Delete() (int64, error) {
 //
 // All documentation for QueryPlan applies to AssignQueryPlan, too.
 type AssignQueryPlan struct {
-	QueryPlan
+	*QueryPlan
 }
 
 func (plan *AssignQueryPlan) Assign(fieldPtr interface{}, value interface{}) AssignQuery {
-	column, err := plan.targetColMap.columnForPointer(fieldPtr)
+	column, err := plan.colMap.columnForPointer(fieldPtr)
 	if err != nil {
 		plan.Errors = append(plan.Errors, err)
 		return plan
@@ -902,7 +805,13 @@ func (plan *AssignQueryPlan) Assign(fieldPtr interface{}, value interface{}) Ass
 	return plan
 }
 
+func (plan *AssignQueryPlan) Join(table interface{}) AssignJoinQuery {
+	plan.QueryPlan.Join(table)
+	return &AssignJoinQueryPlan{plan}
+}
+
 func (plan *AssignQueryPlan) Where() UpdateQuery {
+	plan.QueryPlan.Where()
 	return plan
 }
 
@@ -947,6 +856,57 @@ func (plan *AssignQueryPlan) Null(fieldPtr interface{}) UpdateQuery {
 }
 
 func (plan *AssignQueryPlan) NotNull(fieldPtr interface{}) UpdateQuery {
+	plan.QueryPlan.NotNull(fieldPtr)
+	return plan
+}
+
+// An AssignJoinQueryPlan is equivalent to an AssignQueryPlan, with
+// different return types to match AssignJoinQuery.
+type AssignJoinQueryPlan struct {
+	*AssignQueryPlan
+}
+
+func (plan *AssignJoinQueryPlan) On(filter Filter) AssignJoinQuery {
+	plan.AssignQueryPlan.On(filter)
+	return plan
+}
+
+func (plan *AssignJoinQueryPlan) Equal(fieldPtr interface{}, value interface{}) AssignJoinQuery {
+	plan.QueryPlan.Equal(fieldPtr, value)
+	return plan
+}
+
+func (plan *AssignJoinQueryPlan) NotEqual(fieldPtr interface{}, value interface{}) AssignJoinQuery {
+	plan.QueryPlan.NotEqual(fieldPtr, value)
+	return plan
+}
+
+func (plan *AssignJoinQueryPlan) Less(fieldPtr interface{}, value interface{}) AssignJoinQuery {
+	plan.QueryPlan.Less(fieldPtr, value)
+	return plan
+}
+
+func (plan *AssignJoinQueryPlan) LessOrEqual(fieldPtr interface{}, value interface{}) AssignJoinQuery {
+	plan.QueryPlan.LessOrEqual(fieldPtr, value)
+	return plan
+}
+
+func (plan *AssignJoinQueryPlan) Greater(fieldPtr interface{}, value interface{}) AssignJoinQuery {
+	plan.QueryPlan.Greater(fieldPtr, value)
+	return plan
+}
+
+func (plan *AssignJoinQueryPlan) GreaterOrEqual(fieldPtr interface{}, value interface{}) AssignJoinQuery {
+	plan.QueryPlan.GreaterOrEqual(fieldPtr, value)
+	return plan
+}
+
+func (plan *AssignJoinQueryPlan) Null(fieldPtr interface{}) AssignJoinQuery {
+	plan.QueryPlan.Null(fieldPtr)
+	return plan
+}
+
+func (plan *AssignJoinQueryPlan) NotNull(fieldPtr interface{}) AssignJoinQuery {
 	plan.QueryPlan.NotNull(fieldPtr)
 	return plan
 }
