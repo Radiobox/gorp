@@ -61,12 +61,12 @@ type AssignJoiner interface {
 // A Wherer is a query that can execute statements with a WHERE
 // clause.
 type Wherer interface {
-	Where() WhereQuery
+	Where(...Filter) WhereQuery
 }
 
 // An AssignWherer is a Wherer with an assigner return type.
 type AssignWherer interface{
-	Where() UpdateQuery
+	Where(...Filter) UpdateQuery
 }
 
 // A SelectQuery is a query that can only execute SELECT statements.
@@ -79,7 +79,7 @@ type SelectQuery interface {
 type UpdateQuery interface {
 	// Filter is used for queries that are more complex than a few
 	// ANDed constraints.
-	Filter(Filter) UpdateQuery
+	Filter(...Filter) UpdateQuery
 
 	// Equal, NotEqual, Less, LessOrEqual, Greater, GreaterOrEqual,
 	// and NotNull are all what you would expect.  Use them for adding
@@ -113,7 +113,7 @@ type AssignQuery interface {
 type AssignJoinQuery interface {
 	AssignJoiner
 
-	On(filter Filter) AssignJoinQuery
+	On(...Filter) AssignJoinQuery
 
 	Equal(fieldPtr interface{}, value interface{}) AssignJoinQuery
 	NotEqual(fieldPtr interface{}, value interface{}) AssignJoinQuery
@@ -134,7 +134,7 @@ type JoinQuery interface {
 	Joiner
 
 	// On for a JoinQuery is equivalent to Filter for a WhereQuery.
-	On(filter Filter) JoinQuery
+	On(...Filter) JoinQuery
 
 	// These methods should be roughly equivalent to those of a
 	// WhereQuery, except they add to the ON clause instead of the
@@ -158,7 +158,7 @@ type JoinQuery interface {
 type WhereQuery interface {
 	// Filter is used for queries that are more complex than a few
 	// ANDed constraints.
-	Filter(Filter) WhereQuery
+	Filter(...Filter) WhereQuery
 
 	// Equal, NotEqual, Less, LessOrEqual, Greater, GreaterOrEqual,
 	// and NotNull are all what you would expect.  Use them for adding
@@ -436,16 +436,18 @@ func (plan *QueryPlan) Join(target interface{}) JoinQuery {
 	return &JoinQueryPlan{QueryPlan: plan}
 }
 
-func (plan *QueryPlan) On(filter Filter) JoinQuery {
-	plan.filters.Add(filter)
+func (plan *QueryPlan) On(filters ...Filter) JoinQuery {
+	plan.filters.Add(filters...)
 	return &JoinQueryPlan{QueryPlan: plan}
 }
 
 // Where stores any join filter and allocates a new and filter to use
-// for WHERE clause creation.
-func (plan *QueryPlan) Where() WhereQuery {
+// for WHERE clause creation.  If you pass filters to it, they will be
+// passed to plan.Filter().
+func (plan *QueryPlan) Where(filters ...Filter) WhereQuery {
 	plan.storeJoin()
 	plan.filters = new(andFilter)
+	plan.Filter(filters...)
 	return plan
 }
 
@@ -455,8 +457,8 @@ func (plan *QueryPlan) Where() WhereQuery {
 //
 //     query.Filter(gorp.Or(gorp.Equal(&field.Id, id), gorp.Less(&field.Priority, 3)))
 //
-func (plan *QueryPlan) Filter(filter Filter) WhereQuery {
-	plan.filters.Add(filter)
+func (plan *QueryPlan) Filter(filters ...Filter) WhereQuery {
+	plan.filters.Add(filters...)
 	return plan
 }
 
@@ -855,13 +857,13 @@ func (plan *AssignQueryPlan) Join(table interface{}) AssignJoinQuery {
 	return &AssignJoinQueryPlan{plan}
 }
 
-func (plan *AssignQueryPlan) Where() UpdateQuery {
-	plan.QueryPlan.Where()
+func (plan *AssignQueryPlan) Where(filters ...Filter) UpdateQuery {
+	plan.QueryPlan.Where(filters...)
 	return plan
 }
 
-func (plan *AssignQueryPlan) Filter(filter Filter) UpdateQuery {
-	plan.QueryPlan.Filter(filter)
+func (plan *AssignQueryPlan) Filter(filters ...Filter) UpdateQuery {
+	plan.QueryPlan.Filter(filters...)
 	return plan
 }
 
@@ -911,8 +913,8 @@ type AssignJoinQueryPlan struct {
 	*AssignQueryPlan
 }
 
-func (plan *AssignJoinQueryPlan) On(filter Filter) AssignJoinQuery {
-	plan.AssignQueryPlan.On(filter)
+func (plan *AssignJoinQueryPlan) On(filters ...Filter) AssignJoinQuery {
+	plan.AssignQueryPlan.On(filters...)
 	return plan
 }
 
