@@ -206,7 +206,7 @@ func Equal(fieldPtr interface{}, value interface{}) Filter {
 
 // NotEqual returns a filter for fieldPtr != value
 func NotEqual(fieldPtr interface{}, value interface{}) Filter {
-	return &comparisonFilter{fieldPtr, "!=", value}
+	return &comparisonFilter{fieldPtr, "<>", value}
 }
 
 // Less returns a filter for fieldPtr < value
