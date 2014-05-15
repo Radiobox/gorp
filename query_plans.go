@@ -639,15 +639,16 @@ func (plan *QueryPlan) selectQuery() (string, error) {
 		}
 		buffer.WriteString(groupBy)
 	}
-	if plan.limit > 0 {
-		buffer.WriteString(" limit ")
-		buffer.WriteString(plan.table.dbmap.Dialect.BindVar(len(plan.args)))
-		plan.args = append(plan.args, plan.limit)
-	}
 	if plan.offset > 0 {
 		buffer.WriteString(" offset ")
 		buffer.WriteString(plan.table.dbmap.Dialect.BindVar(len(plan.args)))
 		plan.args = append(plan.args, plan.offset)
+	}
+	if plan.limit > 0 {
+		buffer.WriteString(" fetch next ")
+		buffer.WriteString(plan.table.dbmap.Dialect.BindVar(len(plan.args)))
+		plan.args = append(plan.args, plan.limit)
+		buffer.WriteString(" rows only")
 	}
 	return buffer.String(), nil
 }
