@@ -645,10 +645,10 @@ func (plan *QueryPlan) selectQuery() (string, error) {
 		plan.args = append(plan.args, plan.offset)
 	}
 	if plan.limit > 0 {
-		buffer.WriteString(" fetch next ")
+		buffer.WriteString(" fetch next (")
 		buffer.WriteString(plan.table.dbmap.Dialect.BindVar(len(plan.args)))
 		plan.args = append(plan.args, plan.limit)
-		buffer.WriteString(" rows only")
+		buffer.WriteString(") rows only")
 	}
 	return buffer.String(), nil
 }
