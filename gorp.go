@@ -1409,17 +1409,21 @@ func hookedselect(m *DbMap, exec SqlExecutor, i interface{}, query string,
 	// Determine where the results are: written to i, or returned in list
 	if t, _ := toSliceType(i); t == nil {
 		for _, v := range list {
-			err = runHook("PostGet", reflect.ValueOf(v), hookArg(exec))
-			if err != nil {
-				return nil, err
+			if v, ok := v.(HasPostGet); ok {
+				err := v.PostGet(exec)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 	} else {
 		resultsValue := reflect.Indirect(reflect.ValueOf(i))
 		for i := 0; i < resultsValue.Len(); i++ {
-			err = runHook("PostGet", resultsValue.Index(i), hookArg(exec))
-			if err != nil {
-				return nil, err
+			if v, ok := resultsValue.Index(i).Interface().(HasPostGet); ok {
+				err := v.PostGet(exec)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -1611,14 +1615,16 @@ func columnToFieldIndex(m *DbMap, t reflect.Type, cols []string) ([][]int, error
 	// a field in the i struct
 	for x := range cols {
 		colName := strings.ToLower(cols[x])
-
 		field, found := t.FieldByNameFunc(func(fieldName string) bool {
+			var mappedFieldName string
 			field, _ := t.FieldByName(fieldName)
-			fieldName = field.Tag.Get("db")
-
-			if fieldName == "-" {
+			lowerFieldName := strings.ToLower(field.Name)
+			mappedFieldName = field.Tag.Get("db")
+			if mappedFieldName == "-" && colName != lowerFieldName {
 				return false
-			} else if fieldName == "" {
+			} else if mappedFieldName == "-" && colName == lowerFieldName {
+				return true
+			} else if mappedFieldName == "" {
 				fieldName = field.Name
 			}
 			if tableMapped {
@@ -1627,7 +1633,6 @@ func columnToFieldIndex(m *DbMap, t reflect.Type, cols []string) ([][]int, error
 					fieldName = colMap.ColumnName
 				}
 			}
-
 			return colName == strings.ToLower(fieldName)
 		})
 		if found {
@@ -1746,16 +1751,17 @@ func get(m *DbMap, exec SqlExecutor, i interface{},
 		}
 	}
 
-	err = runHook("PostGet", v, hookArg(exec))
-	if err != nil {
-		return nil, err
+	if v, ok := v.Interface().(HasPostGet); ok {
+		err := v.PostGet(exec)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return v.Interface(), nil
 }
 
 func delete(m *DbMap, exec SqlExecutor, list ...interface{}) (int64, error) {
-	hookarg := hookArg(exec)
 	count := int64(0)
 	for _, ptr := range list {
 		table, elem, err := m.tableForPointer(ptr, true)
@@ -1763,10 +1769,12 @@ func delete(m *DbMap, exec SqlExecutor, list ...interface{}) (int64, error) {
 			return -1, err
 		}
 
-		eptr := elem.Addr()
-		err = runHook("PreDelete", eptr, hookarg)
-		if err != nil {
-			return -1, err
+		eval := elem.Addr().Interface()
+		if v, ok := eval.(HasPreDelete); ok {
+			err = v.PreDelete(exec)
+			if err != nil {
+				return -1, err
+			}
 		}
 
 		bi, err := table.bindDelete(elem)
@@ -1790,9 +1798,11 @@ func delete(m *DbMap, exec SqlExecutor, list ...interface{}) (int64, error) {
 
 		count += rows
 
-		err = runHook("PostDelete", eptr, hookarg)
-		if err != nil {
-			return -1, err
+		if v, ok := eval.(HasPostDelete); ok {
+			err := v.PostDelete(exec)
+			if err != nil {
+				return -1, err
+			}
 		}
 	}
 
@@ -1800,7 +1810,6 @@ func delete(m *DbMap, exec SqlExecutor, list ...interface{}) (int64, error) {
 }
 
 func update(m *DbMap, exec SqlExecutor, list ...interface{}) (int64, error) {
-	hookarg := hookArg(exec)
 	count := int64(0)
 	for _, ptr := range list {
 		table, elem, err := m.tableForPointer(ptr, true)
@@ -1808,10 +1817,12 @@ func update(m *DbMap, exec SqlExecutor, list ...interface{}) (int64, error) {
 			return -1, err
 		}
 
-		eptr := elem.Addr()
-		err = runHook("PreUpdate", eptr, hookarg)
-		if err != nil {
-			return -1, err
+		eval := elem.Addr().Interface()
+		if v, ok := eval.(HasPreUpdate); ok {
+			err = v.PreUpdate(exec)
+			if err != nil {
+				return -1, err
+			}
 		}
 
 		bi, err := table.bindUpdate(elem)
@@ -1840,26 +1851,29 @@ func update(m *DbMap, exec SqlExecutor, list ...interface{}) (int64, error) {
 
 		count += rows
 
-		err = runHook("PostUpdate", eptr, hookarg)
-		if err != nil {
-			return -1, err
+		if v, ok := eval.(HasPostUpdate); ok {
+			err = v.PostUpdate(exec)
+			if err != nil {
+				return -1, err
+			}
 		}
 	}
 	return count, nil
 }
 
 func insert(m *DbMap, exec SqlExecutor, list ...interface{}) error {
-	hookarg := hookArg(exec)
 	for _, ptr := range list {
 		table, elem, err := m.tableForPointer(ptr, false)
 		if err != nil {
 			return err
 		}
 
-		eptr := elem.Addr()
-		err = runHook("PreInsert", eptr, hookarg)
-		if err != nil {
-			return err
+		eval := elem.Addr().Interface()
+		if v, ok := eval.(HasPreInsert); ok {
+			err := v.PreInsert(exec)
+			if err != nil {
+				return err
+			}
 		}
 
 		bi, err := table.bindInsert(elem)
@@ -1888,25 +1902,11 @@ func insert(m *DbMap, exec SqlExecutor, list ...interface{}) error {
 			}
 		}
 
-		err = runHook("PostInsert", eptr, hookarg)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func hookArg(exec SqlExecutor) []reflect.Value {
-	execval := reflect.ValueOf(exec)
-	return []reflect.Value{execval}
-}
-
-func runHook(name string, eptr reflect.Value, arg []reflect.Value) error {
-	hook := eptr.MethodByName(name)
-	if hook != zeroVal {
-		ret := hook.Call(arg)
-		if len(ret) > 0 && !ret[0].IsNil() {
-			return ret[0].Interface().(error)
+		if v, ok := eval.(HasPostInsert); ok {
+			err := v.PostInsert(exec)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -1926,4 +1926,39 @@ func lockError(m *DbMap, exec SqlExecutor, tableName string,
 		ole.RowExists = false
 	}
 	return -1, ole
+}
+
+// PostUpdate() will be executed after the GET statement.
+type HasPostGet interface {
+	PostGet(SqlExecutor) error
+}
+
+// PostUpdate() will be executed after the DELETE statement
+type HasPostDelete interface {
+	PostDelete(SqlExecutor) error
+}
+
+// PostUpdate() will be executed after the UPDATE statement
+type HasPostUpdate interface {
+	PostUpdate(SqlExecutor) error
+}
+
+// PostInsert() will be executed after the INSERT statement
+type HasPostInsert interface {
+	PostInsert(SqlExecutor) error
+}
+
+// PreDelete() will be executed before the DELETE statement.
+type HasPreDelete interface {
+	PreDelete(SqlExecutor) error
+}
+
+// PreUpdate() will be executed before UPDATE statement.
+type HasPreUpdate interface {
+	PreUpdate(SqlExecutor) error
+}
+
+// PreInsert() will be executed before INSERT statement.
+type HasPreInsert interface {
+	PreInsert(SqlExecutor) error
 }
